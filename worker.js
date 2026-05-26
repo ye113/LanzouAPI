@@ -201,7 +201,7 @@ export default {
 			const resp = new Response(JSON.stringify({ code: 200, msg: '解析成功', name: softName, filesize: softFilesize, downUrl: outputUrl }, null, 2), {
 				headers: { 'Content-Type': 'application/json; charset=utf-8', 'Access-Control-Allow-Origin': '*' },
 			});
-			resp.headers.set('Cache-Control', `public, max-age=${CACHE_TTL}`);
+			resp.headers.set('Cache-Control', `public, s-maxage=${CACHE_TTL}, max-age=${CACHE_TTL}`);
 			ctx.waitUntil(caches.default.put(new Request(request.url), resp.clone()));
 			return resp;
 		} else {

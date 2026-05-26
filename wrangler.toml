@@ -1,3 +1,6 @@
 name = 'lanzouapi'
 main = 'worker.js'
 compatibility_date = '2025-01-01'
+
+[vars]
+CACHE_TTL = '1800'

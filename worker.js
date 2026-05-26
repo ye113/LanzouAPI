@@ -70,13 +70,23 @@ function acwScV2Simple(arg1) {
 }
 
 export default {
-	async fetch(request) {
+	async fetch(request, env, ctx) {
+		const CACHE_TTL = parseInt(env.CACHE_TTL || '1800');
+		const COOKIE = env.COOKIE || '';
+		const LANZOU_DOMAIN = env.LANZOU_DOMAIN || 'www.lanzouf.com';
+
 		const reqUrl = new URL(request.url);
 		const params = reqUrl.searchParams;
 		const inputUrl = params.get('url');
 		const pwd = params.get('pwd');
 		const type = params.get('type');
 		const rename = params.get('n');
+
+		const shouldCache = inputUrl && type !== 'down';
+		if (shouldCache) {
+			const cached = await caches.default.match(new Request(request.url));
+			if (cached) return cached;
+		}
 
 		if (!inputUrl) {
 			return new Response(JSON.stringify({ code: 400, msg: '请输入URL' }, null, 2), {
@@ -86,9 +96,9 @@ export default {
 
 		const webpage = inputUrl.includes('?') ? inputUrl.split('?')[1] : '';
 		const comIdx = inputUrl.indexOf('.com/');
-		const normUrl = 'https://www.lanzouf.com/' + inputUrl.substring(comIdx + 5);
+		const normUrl = 'https://' + LANZOU_DOMAIN + '/' + inputUrl.substring(comIdx + 5);
 
-		let cookie = '';
+		let cookie = COOKIE;
 		let html = await fetchPage(normUrl, 'acw_sc__v2=' + cookie);
 
 		if (html.includes('文件取消分享了')) {
@@ -127,7 +137,7 @@ export default {
 				});
 			}
 			const postDataObj = { action: 'downprocess', sign: signMatch[1][1], p: pwd, kd: 1 };
-			const respText = await postData(postDataObj, 'https://www.lanzouf.com/' + ajaxmMatch[0], normUrl);
+			const respText = await postData(postDataObj, 'https://' + LANZOU_DOMAIN + '/' + ajaxmMatch[0], normUrl);
 			softInfo = JSON.parse(respText);
 			softName = softInfo.inf || '';
 		} else {
@@ -138,7 +148,7 @@ export default {
 					headers: { 'Content-Type': 'application/json; charset=utf-8', 'Access-Control-Allow-Origin': '*' },
 				});
 			}
-			const ifurl = 'https://www.lanzouf.com/' + m[1];
+			const ifurl = 'https://' + LANZOU_DOMAIN + '/' + m[1];
 			let segment, ajaxm;
 			if (webpage) {
 				segment = [...html.matchAll(/'sign':'(.*?)',/g)];
@@ -149,7 +159,7 @@ export default {
 					});
 				}
 				const postDataObj = { action: 'downprocess', websignkey: 'Em2R', sign: segment[1][1], websign: 2, kd: 1, ves: 1 };
-				const respText = await postData(postDataObj, 'https://www.lanzouf.com/' + ajaxm[0], normUrl);
+				const respText = await postData(postDataObj, 'https://' + LANZOU_DOMAIN + '/' + ajaxm[0], normUrl);
 				softInfo = JSON.parse(respText);
 			} else {
 				const iframeHtml = await fetchPage(ifurl, 'acw_sc__v2=' + cookie);
@@ -162,7 +172,7 @@ export default {
 					});
 				}
 				const postDataObj = { action: 'downprocess', websignkey: ajaxdataMatch[1], signs: ajaxdataMatch[1], sign: wpSignMatch[1], websign: '', kd: 1, ves: 1 };
-				const respText = await postData(postDataObj, 'https://www.lanzouf.com/' + ajaxm[0], ifurl, 'acw_sc__v2=' + cookie);
+				const respText = await postData(postDataObj, 'https://' + LANZOU_DOMAIN + '/' + ajaxm[0], ifurl, 'acw_sc__v2=' + cookie);
 				softInfo = JSON.parse(respText);
 			}
 		}
@@ -188,9 +198,12 @@ export default {
 		}
 
 		if (type !== 'down') {
-			return new Response(JSON.stringify({ code: 200, msg: '解析成功', name: softName, filesize: softFilesize, downUrl: outputUrl }, null, 2), {
+			const resp = new Response(JSON.stringify({ code: 200, msg: '解析成功', name: softName, filesize: softFilesize, downUrl: outputUrl }, null, 2), {
 				headers: { 'Content-Type': 'application/json; charset=utf-8', 'Access-Control-Allow-Origin': '*' },
 			});
+			resp.headers.set('Cache-Control', `public, max-age=${CACHE_TTL}`);
+			ctx.waitUntil(caches.default.put(new Request(request.url), resp.clone()));
+			return resp;
 		} else {
 			return Response.redirect(outputUrl, 302);
 		}

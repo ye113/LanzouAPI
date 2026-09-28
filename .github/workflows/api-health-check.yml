@@ -79,6 +79,7 @@ jobs:
 
       - name: Send failure email
         if: steps.server.outcome == 'failure' || steps.health.outcome == 'failure'
+        continue-on-error: true
         env:
           SMTP_HOST: ${{ secrets.SMTP_HOST }}
           SMTP_PORT: ${{ secrets.SMTP_PORT }}

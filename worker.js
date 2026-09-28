@@ -77,23 +77,43 @@ async function postData(post_data, url, referer = '', cookie = '') {
 	return await resp.text();
 }
 
-async function fetchRedirectUrl(url, referer = '', cookie = '') {
+async function fetchRedirectUrl(url) {
+	// 蓝奏云 CDN 会先返回 ESA 挑战页，需按浏览器特征请求并算出 acw_sc__v2 重试；
+	// 302 的 Location 才是最终直链（不能自动跟随跳转，否则会下载整个文件）
+	const cookies = {};
 	const headers = {
-		'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
-		'Accept-Encoding': 'gzip, deflate',
-		'Accept-Language': 'zh-CN,zh;q=0.9',
-		'Cache-Control': 'no-cache',
-		'Connection': 'keep-alive',
-		'Pragma': 'no-cache',
+		'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+		'Accept-Language': 'zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7',
+		'Cache-Control': 'max-age=0',
 		'Upgrade-Insecure-Requests': '1',
+		'X-Requested-With': 'mark.via',
 		'User-Agent': USER_AGENT,
 		'X-Forwarded-For': randIP(),
 		'CLIENT-IP': randIP(),
 	};
-	if (cookie) headers['Cookie'] = cookie;
-	if (referer) headers['Referer'] = referer;
-	const resp = await fetch(url, { headers, redirect: 'manual' });
-	return resp.headers.get('Location') || resp.headers.get('location') || '';
+	for (let i = 0; i < 3; i++) {
+		const cookiePairs = Object.entries(cookies).map(([k, v]) => `${k}=${v}`);
+		const reqHeaders = { ...headers };
+		if (cookiePairs.length) reqHeaders['Cookie'] = cookiePairs.join('; ');
+		const resp = await fetch(url, { headers: reqHeaders, redirect: 'manual' });
+		const location = resp.headers.get('Location') || resp.headers.get('location') || '';
+		const setCookies = typeof resp.headers.getSetCookie === 'function'
+			? resp.headers.getSetCookie()
+			: (resp.headers.get('set-cookie') ? [resp.headers.get('set-cookie')] : []);
+		for (const raw of setCookies) {
+			const pair = String(raw).split(';')[0].split('=');
+			if (pair.length >= 2) cookies[pair[0].trim()] = pair.slice(1).join('=').trim();
+		}
+		if (location) return location;
+		const body = await resp.text();
+		const match = body.match(/var\s+arg1=['"]([0-9a-f]{40})['"]/i);
+		if (match) {
+			cookies['acw_sc__v2'] = acwScV2Simple(match[1]);
+			continue;
+		}
+		break;
+	}
+	return '';
 }
 
 function extractFileName(html) {
@@ -110,9 +130,22 @@ function extractFileSize(html) {
 	return m ? m[1] : '';
 }
 
-function extractAjaxPath(html) {
-	const m = html.match(/(?:^|\/)(ajax(?:m|file)\.php\?file=\d+)/m);
-	return m ? m[1] : '';
+function extractAjaxPath(html, origin) {
+	// 下载接口可能是绝对地址（apifile.lanzouw.com），也可能是相对地址
+	const m = html.match(/(?:https?:\/\/[^/\s]+\/)?(ajax(?:m|file)\.php\?file=\d+)/);
+	if (!m) return '';
+	const path = m[0];
+	if (path.startsWith('http')) return path;
+	return origin + '/' + path.replace(/^\//, '');
+}
+
+function replaceUrlSuffix(url, suffix) {
+	suffix = String(suffix).replace(/^\./, '');
+	return url.replace(/(fileName|fn)=([^&]*)/, (full, key, value) => {
+		const decoded = decodeURIComponent(value);
+		const renamed = decoded.replace(/\.[A-Za-z0-9]+$/, '') + '.' + suffix;
+		return key + '=' + encodeURIComponent(renamed);
+	});
 }
 
 function extractPasswordSign(html) {
@@ -189,13 +222,13 @@ export default {
 				return jsonResponse({ code: 400, msg: '请输入分享密码' });
 			}
 			const sign = extractPasswordSign(html);
-			const ajaxPath = extractAjaxPath(html);
+			const ajaxPath = extractAjaxPath(html, origin);
 			if (!sign || !ajaxPath) {
 				return jsonResponse({ code: 400, msg: '未找到密码页 sign 或下载接口参数' });
 			}
 			const respText = await postData(
 				{ action: 'downprocess', sign, p: pwd, kd: 1 },
-				origin + '/' + ajaxPath,
+				ajaxPath,
 				normUrl,
 				'acw_sc__v2=' + cookieState.value
 			);
@@ -204,26 +237,26 @@ export default {
 		} else {
 			let m = html.match(/\n<iframe.*?name="[\s\S]*?"\ssrc="\/(.*?)"/);
 			if (!m) m = html.match(/<iframe.*?name="[\s\S]*?"\ssrc="\/(.*?)"/);
-			if (!m || !m[1]) {
-				return jsonResponse({ code: 400, msg: '解析失败' });
-			}
-			const ifurl = origin + '/' + m[1];
+			const ifurl = origin + '/' + (m && m[1] ? m[1] : '');
 			let postDataObj;
 			let ajaxPath;
 
 			if (webpage) {
 				const segment = [...html.matchAll(/'sign':'(.*?)'/g)];
-				ajaxPath = extractAjaxPath(html);
+				ajaxPath = extractAjaxPath(html, origin);
 				if (!segment.length || !ajaxPath) {
 					return jsonResponse({ code: 400, msg: '解析失败' });
 				}
 				const sign = segment.length > 1 ? segment[1][1] : segment[0][1];
 				postDataObj = { action: 'downprocess', websignkey: 'Em2R', sign, websign: 2, kd: 1, ves: 1 };
 			} else {
+				if (!m || !m[1]) {
+					return jsonResponse({ code: 400, msg: '未找到下载入口，请检查链接是否有效' });
+				}
 				html = await fetchPageWithChallenge(ifurl, cookieState, normUrl);
 				const wpSignMatch = html.match(/wp_sign = '(.*?)'/);
 				const ajaxdataMatch = html.match(/ajaxdata = '(.*?)'/);
-				ajaxPath = extractAjaxPath(html);
+				ajaxPath = extractAjaxPath(html, origin);
 				if (!wpSignMatch || !ajaxdataMatch || !ajaxPath) {
 					return jsonResponse({ code: 400, msg: '解析失败' });
 				}
@@ -240,7 +273,7 @@ export default {
 
 			const respText = await postData(
 				postDataObj,
-				origin + '/' + ajaxPath,
+				ajaxPath,
 				ifurl,
 				'acw_sc__v2=' + cookieState.value
 			);
@@ -257,15 +290,11 @@ export default {
 		}
 
 		const downUrl1 = softInfo.dom + '/file/' + softInfo.url;
-		await fetchPage(downUrl1, 'acw_sc__v2=' + cookieState.value);
-
-		const cookieStr = 'down_ip=1; acw_sc__v2=' + cookieState.value;
-		const downUrl2 = await fetchRedirectUrl(downUrl1, origin, cookieStr);
+		const downUrl2 = await fetchRedirectUrl(downUrl1);
 		let outputUrl = downUrl2 && downUrl2.startsWith('http') ? downUrl2 : downUrl1;
 
 		if (rename) {
-			const rnMatch = outputUrl.match(/(.*?)\?fn=(.*?)\./);
-			if (rnMatch) outputUrl = rnMatch[0] + rename;
+			outputUrl = replaceUrlSuffix(outputUrl, rename);
 		}
 
 		outputUrl = outputUrl.replace(/pid=(.*?)&/g, '');
